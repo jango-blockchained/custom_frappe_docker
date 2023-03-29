@@ -27,6 +27,9 @@ services:
       - RESTIC_PASSWORD=secret_restic_password
     volumes:
       - "sites:/home/frappe/frappe-bench/sites"
+    networks:
+      - bench-network
+      - mariadb-network
 
 networks:
   bench-network:
