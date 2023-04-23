@@ -37,19 +37,24 @@ def parse_args():
     parser.add_argument(
         "--dbaas",
         help="set if using DBaaS",
-        action=argparse.BooleanOptionalAction,  # noqa: E501
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-pause",
+        help="Do not pause source site",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--restore-remotely",
+        help="restore from vm",
+        action="store_true",
     )
     return parser.parse_args()
 
 
-def pause_bench(args: argparse.Namespace):
+def execute_ssh_command(args, ssh_cmd):
     keyfile_path = "/home/frappe/.ssh/id_rsa"
-    ssh_cmd = f"cd {args.bench_dir};"
-    ssh_cmd += f"bench --site {args.site} set-config --as-dict maintenance_mode 1;"  # noqa: E501
-    ssh_cmd += (
-        f"bench --site {args.site} set-config --as-dict pause_scheduler 1"  # noqa: E501
-    )
-    cmd = f'ssh -i {args.keyfile_path or keyfile_path} {args.vm_user}@{args.vm_host} "{ssh_cmd}"'  # noqa: E501
+    cmd = f'ssh -o StrictHostKeyChecking=no -i {args.keyfile_path or keyfile_path} {args.vm_user}@{args.vm_host} "{ssh_cmd}"'  # noqa: E501
 
     out, err = subprocess.Popen(
         cmd,
@@ -59,22 +64,40 @@ def pause_bench(args: argparse.Namespace):
 
     if err:
         log.error(err)
+        raise Exception(err)
 
     log.info(out)
+    return out
 
 
-def restore_database(args: argparse.Namespace):
-    keyfile_path = "/home/frappe/.ssh/id_rsa"
+def pause_bench(args: argparse.Namespace):
+    if args.no_pause:
+        log.info("Skipped pausing bench due to --no-pause")
+        return
+    log.info("Pausing remote bench")
+    ssh_cmd = f"cd {args.bench_dir};"
+    ssh_cmd += f"bench --site {args.site} set-config --as-dict maintenance_mode 1;"  # noqa: E501
+    ssh_cmd += (
+        f"bench --site {args.site} set-config --as-dict pause_scheduler 1"  # noqa: E501
+    )
+    execute_ssh_command(args, ssh_cmd)
+    log.info("Remote bench paused")
 
+
+def get_remote_site_config(args: argparse.Namespace):
     # Read remote site_config
     site_config_file = (
         args.bench_dir + "/sites/" + args.site + "/site_config.json"
     )  # noqa: E501
 
     ssh_cmd = f"cat {site_config_file}"
-    cmd = f'ssh -i {args.keyfile_path or keyfile_path} {args.vm_user}@{args.vm_host} "{ssh_cmd}"'  # noqa: E501
-    site_cfg_str = subprocess.check_output(cmd, shell=True)
+    site_cfg_str = execute_ssh_command(args, ssh_cmd)
     site_config = json.loads(site_cfg_str)
+    return site_config
+
+
+def create_database(args: argparse.Namespace, db_name: str, db_password: str):
+    log.info("creating database")
 
     # set db perms
     permissions = (
@@ -88,53 +111,59 @@ def restore_database(args: argparse.Namespace):
     )
 
     # create db_name and user db_name@% with db_password and grant priv
-    db_name = site_config.get("db_name")
-    db_password = site_config.get("db_password")
-    mysql_query = f"CREATE DATABASE `{db_name}`;"
-    mysql_query += f"UPDATE mysql.global_priv SET Host = '%' where User = '{db_name}';"  # noqa: E501
-    mysql_query += (
-        f"SET PASSWORD FOR '{db_name}'@'%' = PASSWORD('{db_password}');"  # noqa: E501
-    )
-    mysql_query += f"GRANT {permissions} ON `{db_name}`.* TO '{db_name}'@'%';FLUSH PRIVILEGES;"  # noqa: E501
+    mysql_query = rf"CREATE DATABASE IF NOT EXISTS \`{db_name}\`;"
+    mysql_query += f"CREATE USER IF NOT EXISTS '{db_name}'@'%' IDENTIFIED BY '{db_password}';"  # noqa: E501
+    mysql_query += rf"GRANT {permissions} ON \`{db_name}\`.* TO '{db_name}'@'%';FLUSH PRIVILEGES;"  # noqa: E501
 
     mysql_cmd = f"mysql -u{args.db_root_user} -p'{args.db_root_password}' -h{args.db_host} -e \"{mysql_query}\""  # noqa: E501
-    res = subprocess.check_output(mysql_cmd, shell=True)
-    log.info(res)
+    subprocess.check_output(mysql_cmd, shell=True)
+
+
+def backup_database(args):
+    site_config = get_remote_site_config(args)
+    db_name = site_config.get("db_name")
+    db_password = site_config.get("db_password")
+    create_database(args, db_name, db_password)
 
     # backup remote database
-    ssh_cmd = f"cd {args.bench_dir};"
-    ssh_cmd += f"bench --site {args.site} backup"
-    cmd = f'ssh -i {args.keyfile_path or keyfile_path} {args.vm_user}@{args.vm_host} "{ssh_cmd}"'  # noqa: E501
-    out, err = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-    ).communicate()
+    log.info("Take latest remote database backup")
+    ssh_cmd = f"cd {args.bench_dir};bench --site {args.site} backup"
+    execute_ssh_command(args, ssh_cmd)
+    log.info("Remote database backup complete")
 
-    if err:
-        log.error(err)
 
-    log.info(out)
+def restore_database(args: argparse.Namespace):
+    log.info("Restoring database")
+    log.info("Get remote database credentials")
+    site_config = get_remote_site_config(args)
+    db_name = site_config.get("db_name")
 
-    # restore backup to db_host
-    restore_file = ""
-    ssh_cmd = f"gunzip < {restore_file} | mysql -u{args.db_root_user} -p'{args.db_root_password}' -h{args.db_host} {db_name}"  # noqa: E501
-    cmd = f'ssh -i {args.keyfile_path or keyfile_path} {args.vm_user}@{args.vm_host} "{ssh_cmd}"'  # noqa: E501
-    out, err = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-    ).communicate()
+    log.info("Restore latest backup")
 
-    if err:
-        log.error(err)
+    if args.restore_remotely:
+        ssh_cmd = f"ls -t1 {args.bench_dir}/sites/{args.site}/private/backups/*.sql.gz | head -1"  # noqa: E501
+        restore_file = (
+            execute_ssh_command(
+                args,
+                ssh_cmd,
+            )
+            .decode("utf-8")
+            .replace("\n", "")
+        )
+        ssh_cmd = f"gunzip < {restore_file} | mysql -u{args.db_root_user} -p'{args.db_root_password}' -h{args.db_host} {db_name}"  # noqa: E501
+        execute_ssh_command(args, ssh_cmd)
+    else:
+        cmd = f"ls -t1 {args.dest_dir}/sites/{args.site}/private/backups/*.sql.gz | head -1"  # noqa: E501
+        restore_file = subprocess.check_output(cmd, shell=True)
+        cmd = f"gunzip < {restore_file} | mysql -u{args.db_root_user} -p'{args.db_root_password}' -h{args.db_host} {db_name}"  # noqa: E501
+        subprocess.check_output(cmd, shell=True)
 
-    log.info(out)
+    log.info("Restore database complete")
 
 
 def rsync_files(args: argparse.Namespace):
     keyfile_path = "/home/frappe/.ssh/id_rsa"
-    cmd = f'rsync -ave "ssh -i {args.keyfile_path or keyfile_path}" {args.vm_user}@{args.vm_host}:{args.bench_dir}/sites/{args.site} {args.dest_bench}/sites/'  # noqa: E501
+    cmd = f'rsync --no-group --no-owner --no-perms -ave "ssh -i {args.keyfile_path or keyfile_path} -o StrictHostKeyChecking=no" {args.vm_user}@{args.vm_host}:{args.bench_dir}/sites/{args.site} {args.dest_bench}/sites/'  # noqa: E501
 
     out, err = subprocess.Popen(
         cmd,
@@ -157,13 +186,17 @@ def move_site_to_dest_dir(args: argparse.Namespace):
 
 
 def unpause_bench(args: argparse.Namespace):
+    if args.no_pause:
+        log.info("Skipped unpausing bench due to --no-pause")
+        return
+
     log.info("unpausing bench")
 
     site = args.site
     if args.dest_dir:
         site = args.dest_dir
 
-    site_config = args.dest_bench + site + "/site_config.json"
+    site_config = args.dest_bench + "/sites/" + site + "/site_config.json"
 
     data = {}
     with open(site_config, "r") as json_file:
@@ -181,8 +214,9 @@ def unpause_bench(args: argparse.Namespace):
 def main():
     args = parse_args()
     pause_bench(args)
-    restore_database(args)
+    backup_database(args)
     rsync_files(args)
+    restore_database(args)
     move_site_to_dest_dir(args)
     unpause_bench(args)
 
@@ -200,4 +234,6 @@ if __name__ == "__main__":
 #  --db-root-password="changeit" \
 #  --bench-dir=/home/frappe/frappe-bench \
 #  --site=erp.example.com \
-#  --keyfile-path=/workspace/gitops/.ssh/id_rsa
+#  --keyfile-path=/workspace/gitops/.ssh/id_rsa \
+#  --no-pause \
+#  --restore-remotely
