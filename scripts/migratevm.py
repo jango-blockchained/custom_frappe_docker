@@ -49,6 +49,11 @@ def parse_args():
         help="restore from vm",
         action="store_true",
     )
+    parser.add_argument(
+        "--clear-db-host",
+        help="Clear db_host from site_config.json",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -211,6 +216,14 @@ def unpause_bench(args: argparse.Namespace):
     log.info("bench unpaused")
 
 
+def clear_db_host(args: argparse.Namespace):
+    if args.clear_db_host:
+        site = args.dest_dir or args.site
+        log.info(f"clearing db_host from {site}/site_config.json")
+        cmd = f"""echo "$(jq 'del(.db_host)' sites/{site}/site_config.json)" > sites/{site}/site_config.json"""  # noqa: E501
+        subprocess.check_output(cmd, shell=True)
+
+
 def main():
     args = parse_args()
     pause_bench(args)
@@ -219,6 +232,7 @@ def main():
     restore_database(args)
     move_site_to_dest_dir(args)
     unpause_bench(args)
+    clear_db_host(args)
 
 
 if __name__ == "__main__":
