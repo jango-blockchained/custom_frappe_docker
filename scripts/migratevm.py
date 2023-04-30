@@ -160,6 +160,7 @@ def restore_database(args: argparse.Namespace):
     else:
         cmd = f"ls -t1 {args.dest_bench}/sites/{args.site}/private/backups/*.sql.gz | head -1"  # noqa: E501
         restore_file = subprocess.check_output(cmd, shell=True)
+        restore_file = restore_file.decode("utf-8").strip()
         cmd = f"gunzip < {restore_file} | mysql -u{args.db_root_user} -p'{args.db_root_password}' -h{args.db_host} {db_name}"  # noqa: E501
         subprocess.check_output(cmd, shell=True)
 
