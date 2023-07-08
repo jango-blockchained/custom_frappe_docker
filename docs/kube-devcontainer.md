@@ -16,8 +16,8 @@ For local development we'll use k3s in container. It can be used with VS Code de
 Clone this repo and copy example directory to begin.
 
 ```shell
-git clone https://github.com/castlecraft/custom_frappe_docker
-cd custom_frappe_docker
+git clone https://github.com/castlecraft/custom_containers
+cd custom_containers
 cp -R kube-devcontainer .devcontainer
 ```
 
@@ -33,7 +33,7 @@ Port 80 and 443 of k3s container is published but no service runs there. We'll a
 We're using ingress-nginx from https://kubernetes.github.io/ingress-nginx/deploy/#gce-gke. On installation it will add a LoadBalancer service to cluster and provision cloud load balancer from provider in production.
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.5.1/deploy/static/provider/cloud/deploy.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
 ```
 
 ### Provision RWX StorageClass
@@ -147,19 +147,18 @@ cat cronjob.yaml | envsubst | kubectl apply -f -
 In case of production setup use AWS RDS, Google Sky SQL, or Managed MariaDB Service that is configurable for frappe specific param group properties. For simple or development setup we will install in-cluster MariaDB Helm chart with following command:
 
 ```shell
+kubectl create namespace mariadb
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update bitnami
-helm upgrade \
-  --wait \
-  --create-namespace \
-  --install mariadb \
-  --namespace mariadb \
+helm install mariadb -n mariadb bitnami/mariadb \
+  --set architecture=standalone \
+  --set auth.rootPassword=admin \
+  --set auth.database=my_database \
+  --set auth.username=my_database \
+  --set auth.password=admin \
+  --set auth.replicationUser=replicator \
+  --set auth.replicationPassword=admin \
   --set primary.extraFlags="--skip-character-set-client-handshake --skip-innodb-read-only-compressed --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci" \
-  --set auth.rootPassword=changeit \
-  --set auth.username=dbadmin \
-  --set auth.password=changeit \
-  --set auth.replicationPassword=changeit \
-  bitnami/mariadb
+  --wait
 ```
 
 ### Setup ERPNext
@@ -177,111 +176,22 @@ helm upgrade \
   --set dbRootPassword=admin \
   --set persistence.worker.enabled=true \
   --set persistence.worker.size=4Gi \
-  --set persistence.worker.storageClass=nfs
+  --set persistence.worker.storageClass=nfs \
+  --set jobs.configure.fixVolume=false \
+  --set jobs.createSite.enabled=true \
+  --set jobs.createSite.siteName=erpnext.localhost \
+  --set ingress.enabled=true \
+  --set ingress.className=nginx \
+  --set "ingress.hosts[0].host=erpnext.localhost" \
+  --set "ingress.hosts[0].paths[0].pathType=ImplementationSpecific" \
+  --set "ingress.hosts[0].paths[0].path=/"
 ```
-
-### Setup Bench Operator
-
-Install flux
-
-```shell
-flux install --components=source-controller,helm-controller
-```
-
-```shell
-helm upgrade --install \
-  --create-namespace \
-  --namespace bench-system \
-  --set api.enabled=true \
-  --set api.apiKey=admin \
-  --set api.apiSecret=changeit \
-  --set api.createFluxRBAC=true \
-  manage-sites k8s-bench/k8s-bench
-```
-
-Port forward kubernetes service locally on port 3000 for development setup. Store it in `site_config.json` and use to make python requests.
-
-```shell
-kubectl port-forward -n bench-system svc/manage-sites-k8s-bench 3000:8000
-```
-
-### ReST API Call
-
-Create Site:
-
-```shell
-curl -X POST -u admin:changeit http://0.0.0.0:3000/bench-command \
-    -H 'Content-Type: application/json' \
-    -d '{
-  "job_name": "create-frappe-local",
-  "sites_pvc": "frappe-bench-erpnext",
-  "args": [
-    "bench",
-    "new-site",
-    "--admin-password=admin",
-    "--db-root-password=admin",
-    "--force",
-    "frappe.localhost"
-  ],
-  "command": null,
-  "logs_pvc": null,
-  "namespace": "erpnext",
-  "image": "frappe/erpnext:v14.13.0",
-  "annotations": {
-    "k8s-bench.castlecraft.in/job-type": "create-site",
-    "k8s-bench.castlecraft.in/ingress-name": "frappe-localhost",
-    "k8s-bench.castlecraft.in/ingress-namespace": "erpnext",
-    "k8s-bench.castlecraft.in/ingress-host": "frappe.localhost",
-    "k8s-bench.castlecraft.in/ingress-svc-name": "frappe-bench-erpnext",
-    "k8s-bench.castlecraft.in/ingress-svc-port": "8080",
-    "k8s-bench.castlecraft.in/ingress-annotations": "{\"kubernetes.io/ingress.class\":\"nginx\"}",
-    "k8s-bench.castlecraft.in/ingress-cert-secret": "frappe-certificate-tls"
-  }
-}
-'
-```
-
-Delete Site:
-
-```shell
-curl -X POST -u admin:changeit http://0.0.0.0:3000/bench-command \
-    -H 'Content-Type: application/json' \
-    -d '{
-  "job_name": "delete-frappe-local",
-  "sites_pvc": "frappe-bench-erpnext",
-  "args": [
-    "bench",
-    "drop-site",
-    "--db-root-password=admin",
-    "--archived-sites-path=deleted-sites",
-    "--no-backup",
-    "--force",
-    "frappe.localhost"
-  ],
-  "command": null,
-  "logs_pvc": null,
-  "namespace": "erpnext",
-  "image": "frappe/erpnext:v14.13.0",
-  "annotations": {
-    "k8s-bench.castlecraft.in/job-type": "delete-site",
-    "k8s-bench.castlecraft.in/ingress-name": "frappe-localhost",
-    "k8s-bench.castlecraft.in/ingress-namespace": "erpnext"
-  }
-}
-'
-```
-
-Notes:
-
-- Refer [K8s Bench docs](https://k8s-bench.castlecraft.in) for more.
-- In case of frappe apps, add `k8s_bench_url`, `k8s_bench_key` and `k8s_bench_secret` in `site_config.json` and use it to make python `requests`. You can use the internal kubernetes service url e.g. `http://manage-sites-k8s-bench.bench-system.svc.cluster.local:8000` instead of exposing the api if your frappe app also resides on same cluster. In case of development setup, use the `http://0.0.0.0:3000` url after accessing it via `kubectl port-forward`
 
 ### Teardown
 
 To teardown delete the helm releases one by one, wait for the pods to get deleted.
 
 ```shell
-helm delete -n bench-system manage-sites
 helm delete -n erpnext frappe-bench
 helm delete -n mariadb mariadb
 helm delete -n nfs in-cluster
