@@ -9,4 +9,4 @@ From Jan 2023, Official frappe_docker has easy process to build custom images. R
 - [Custom Devcontainer](docs/devcontainer.md)
 - [Setup Kubernetes cluster with k3s](docs/k3s-cluster.md)
 - [CI Runner Build API](docs/runner-api.md)
-- [Sanity Checks](docs/frappe-ci-cd.md)
+- [Frappe Base Workflow for Enterprise](docs/frappe-ci-cd.md)
