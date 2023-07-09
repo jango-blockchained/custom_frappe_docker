@@ -40,7 +40,7 @@ curl -X POST \
 
 ## GitHub
 
-Check the `.github/workflows/build.yaml`
+Check the `.github/workflows/build.yaml`. Run the workflow on `main` or your repos default branch. It is set to `build` branch in example file.
 
 Job Inputs
 
